@@ -1,11 +1,12 @@
 import numpy as np
 import scipy.io as sio
 import matplotlib.pyplot as plt
-
+from scipy.signal import stft, get_window
+from scipy.ndimage import gaussian_filter
 
 # Config
-path = r"/content/data_500.mat"  
-fs = 2000                        # packets/s (from Xmodal assuming it's close)
+path = r"c:/Users/ptv57/Downloads/data_500.mat"  
+fs = 500                        # packets/s (from Xmodal assuming it's close)
 static_avg_secs = 4.0            # long-term averaging window to estimate static offset
 chunk_secs = 1.0                 # length of analysis window in seconds
 discard_first_pc_when_reconstructing = True  # recommended in reference paper
@@ -49,6 +50,10 @@ if n_chunks == 0:
 # Pre-allocate per-chunk explained variance (eigenvalue ratios)
 explained_ratios = np.zeros((n_chunks, N), dtype=np.float64)
 
+pcs_90 = np.zeros(n_chunks, dtype=int)
+
+pcs_95 = np.zeros(n_chunks, dtype=int)
+
 def eigen_explained_variance(H):
     """
     Given H (L x N), column-centered, compute R = H^T H,
@@ -88,3 +93,117 @@ for k in range(n_chunks):
     cume = np.cumsum(evr)
     pcs_90[k] = int(np.searchsorted(cume, 0.90, side="left") + 1)
     pcs_95[k] = int(np.searchsorted(cume, 0.95, side="left") + 1)
+
+    
+    
+
+# parameters
+Twin_sec = 0.40          # STFT window length in seconds (Xmodal)
+hop_sec  = 0.02         # STFT hop (shift) in seconds (Xmodal = .004)
+f_lo, f_hi = 15.0, 125.0 # frequency band to display (Xmodal)
+npcs_to_average = 16     # how many PC waveforms to include in the average 16 = 98%
+drop_first_pc = False    # discard 1st PC (recommended in CARM paper)
+normalize_each_pc = True # normalize each PC spectrogram before averaging
+nfft = 1024             # FFT size for STFT (>= nperseg); adjust if you want finer freq grid
+
+# build PCs on the full recording
+# A_dc magnitudes after static offset removal from earlier code
+# column-center across the recording so PCA sees zero-mean features
+A0 = A_dc - A_dc.mean(axis=0, keepdims=True)
+
+# correlation matrix R = H^T H
+R_full = A0.T @ A0
+
+# symmetric eigendecomposition; eigh returns ascending eigenvalues
+w_full, Q_full = np.linalg.eigh(R_full)
+
+# sort eigenvalues/eigenvectors in descending variance order
+idx = np.argsort(w_full)[::-1]
+w_full = w_full[idx]
+Q_full = Q_full[:, idx]
+
+# project the entire time series onto PC directions to get PC waveforms: Hpc_all = A0 Q
+Hpc_all = A0 @ Q_full   # shape (T, N); column i is time series for PC i (h_i)
+
+# choose which PCs to use for spectrogram averaging
+start_idx = 1 if drop_first_pc else 0              # skip PC1 if requested
+stop_idx  = 16            # take next npcs_to_average
+Hpcs_sel  = Hpc_all[:, start_idx:stop_idx]         # shape (T, npcs_to_average)
+
+# STFT settings
+nperseg = int(round(Twin_sec * fs))                # samples per STFT window
+hop     = int(round(hop_sec * fs))                 # hop in samples
+noverlap = nperseg - hop                           # overlap = window - hop
+win = get_window('hann', nperseg, fftbins=True)    # Hann window
+
+# compute and average spectrograms over selected PCs
+S_accum = None
+t_ref, f_ref = None, None  # to keep common time/freq axes
+
+for i in range(Hpcs_sel.shape[1]):
+    x = Hpcs_sel[:, i]                             # time series of PC i
+    #STFT
+    f, t, Z = stft(x, fs=fs, window=win, nperseg=nperseg,
+                   noverlap=noverlap, nfft=nfft, boundary=None, padded=False)
+    mag = np.abs(Z)
+
+    # normalize per PC so averaging isn’t dominated by one PC
+    if normalize_each_pc:
+        m = np.max(mag) + 1e-12
+        mag = mag / m
+
+    # initialize accumulator and references on first iteration
+    if S_accum is None:
+        S_accum = np.zeros_like(mag, dtype=np.float64)
+        f_ref, t_ref = f, t
+
+    # sanity: make sure shapes match if using multiple PCs
+    if mag.shape != S_accum.shape:
+        raise ValueError("Inconsistent STFT shape across PCs. "
+                         "Check fs/nperseg/hop/nfft and boundary options.")
+
+    # accumulate
+    S_accum += mag
+
+# average across PCs
+S_avg = S_accum / Hpcs_sel.shape[1]
+
+# trim to the frequency band (15–125 Hz)
+band = (f_ref >= f_lo) & (f_ref <= f_hi)           # boolean mask for chosen band
+f_band = f_ref[band]
+S_band = S_avg[band, :]
+
+# # Normalize per time slice after noise thresholding
+S_sum = np.sum(S_band, axis = 0)
+S_norm = S_band / (S_sum + 1e-12)
+## for global normalization
+# S_norm = S_thresh / (np.max(S_thresh) + 1e-12)
+
+def noise_floor_adjustment(S, f_band, noise_threshold = 70):
+    # mean magnitude where the frequencies are greater than a threshold value
+    noise_floor = np.mean(S[f_band > noise_threshold,:])
+    # Where the magnitudes are greater than the noise_floor
+    S_threshold = np.where(S >= noise_floor, S, 0)
+
+    return S_threshold
+
+
+
+def plot_spectrogram(spectrogram, title):
+    plt.figure(figsize=(9,4.5))
+    extent = [t_ref[0], t_ref[-1], f_band[0], f_band[-1]]
+    plt.imshow(spectrogram, aspect='auto', origin='lower', extent=extent, interpolation='nearest')
+    plt.colorbar(label='Magnitude linear')
+    plt.xlabel("Time (s)")
+    plt.ylabel("Frequency (Hz)")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+S_thresh = noise_floor_adjustment(S_norm, f_band)
+
+plot_spectrogram(S_avg, "Average of the PCA spectrograms")
+plot_spectrogram(S_band, "Spectrogram with frequency band of 15-125 Hz")
+plot_spectrogram(S_norm, "Spectrogram normalized per time stamp")
+plot_spectrogram(S_thresh, "Spectrogram with noise floor threshold (70 Hz) after normalization")
