@@ -1,0 +1,118 @@
+def calculate_torso_contour(S, f_band, gamma = 0.03):
+    """
+    S: denoised spectrogram
+    gamma (in percent): threshold for energy ratio of FFT
+    f_ref: frequency vector of the spectrogram
+    returns 
+    freq_tc: torso contour frequency
+    """
+    #energy at each time slice
+    energy = np.sum(S, axis = 0) + 1e-12
+    #energy ratio per frequency per time
+    energy_ratio = S / energy[None,:]
+    freq_tc = np.zeros(S.shape[1])
+
+    for t in range(S.shape[1]):
+        index = np.where(energy_ratio[:,t] > gamma)[0]
+        if len(index) > 0:
+            freq_tc[t] = f_band[index].max()
+        else:
+            freq_tc[t] = 0
+    return freq_tc
+
+
+def calculate_movement_speed(S, t, f, percentile=0.5):
+    """
+    S: spectrogram magnitudes
+    t: time vector
+    f: frequency vector
+    percentile: threshold. percentile >=50 is torso, percentile >= 95 is limb
+    """
+    n_freq, n_time = S.shape
+    freq_speed = np.zeros(n_time)
+    cumulative_energy = np.cumsum(S, axis = 0)
+
+    #last row = total energy per time
+    total_energy = cumulative_energy[-1, :] + 1e-12
+
+    P = cumulative_energy / total_energy[None, :]
+
+    for t_idx in range(n_time):
+        idx = np.where(P[:, t_idx] >= percentile)[0]
+        if len(idx) > 0:
+            freq_speed[t_idx] = f[idx[0]]
+        else:
+            freq_speed[t_idx] = 0
+    
+    return freq_speed
+
+def plot_spectrogram_overlay(S, t, f, 
+                            freq_tc=None, 
+                            torso_speed=None, 
+                            limb_speed=None):
+                            
+    plt.figure(figsize=(9,4.5))
+    extent = [t[0], t[-1], f[0], f[-1]]
+
+    # Spectrogram
+    plt.pcolormesh(t, f, S, shading='gouraud')
+    plt.colorbar(label='Magnitude (linear)')
+    plt.xlabel("Time (s)")
+    plt.ylabel("Frequency (Hz)")
+    plt.ylim([15, 100])
+
+    plt.title("Feature Extraction Overlay")
+
+    # Overlay feature extraction
+    if freq_tc is not None:
+        plt.plot(t, freq_tc, color='red', linewidth=1, label="Torso contour frequency")
+    if torso_speed is not None:
+            plt.plot(t, torso_speed, color='yellow', linewidth=1, label="Torso speed (50%)")
+    if limb_speed is not None:
+            plt.plot(t, limb_speed, color='pink', linewidth=1, label="Limb speed (95%)")
+
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def plot_spectrogram_speeds(S, t, f, 
+                            freq_tc,
+                            torso_speed,
+                            limb_speed):
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5), gridspec_kw={'width_ratios': [2.3, 1]})
+    ax = axes[0]
+    extent = [t[0], t[-1], f[0], f[-1]]
+    im = ax.imshow(S,
+                   aspect='auto',
+                   origin='lower',
+                   extent=extent,
+                   interpolation='nearest')
+
+    ax.set_title("Spectrogram", fontsize=13)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Frequency (Hz)")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Magnitude")
+    ax2 = axes[1]
+    ax2.plot(t, freq_tc, color='red', label="Torso contour", linewidth=1.3)
+    if torso_speed is not None:
+        ax2.plot(t, torso_speed, color='yellow', label="Torso speed (50%)", linewidth=1.3)
+    if limb_speed is not None:
+        ax2.plot(t, limb_speed, color='pink', label="Limb speed (95%)", linewidth=1.3)
+    ax2.set_title("Extracted Speed Features", fontsize=13)
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("Frequency (Hz)")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper right", fontsize=9)
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+torso_speed = calculate_movement_speed(mag, t, f, percentile=0.5)
+limb_speed = calculate_movement_speed(mag, t, f, percentile=0.95)
+
+plot_spectrogram_overlay(mag, t, f, torso_speed=torso_speed, limb_speed=limb_speed)
+plot_spectrogram_speeds(mag, t, f, freq_tc, torso_speed, limb_speed)
