@@ -2,7 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.special import hermite, factorial
-
+import scipi.io as sio
+from scipy.signal import stft, get_window
+from scipy.ndimage import gaussian_filter1d
 
 super().__init__()
 
@@ -418,4 +420,5 @@ def process_stft_results(mag, f):
     mag_avg  = np.mean(mag_norm, axis=0)
     mag_nf   = adaptive_noise_floor_per_pc(mag_avg, f, 60, 80)
     return mag_nf
+
 
