@@ -2,11 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.special import hermite, factorial
-import scipi.io as sio
 from scipy.signal import stft, get_window
 from scipy.ndimage import gaussian_filter1d
 
-super().__init__()
 
 def compute_STFT(signal_in, fs, T_win=0.4):
     """
@@ -45,7 +43,8 @@ def compute_STFT(signal_in, fs, T_win=0.4):
 
     nperseg = int(T_win * fs)
     noverlap = int(T_overlap * fs)
-
+    std = nperseg / 8
+    window = signal.windows.gaussian(nperseg,std=std)
     # Initialize as empty lists
     freq = []
     time = []
@@ -56,11 +55,12 @@ def compute_STFT(signal_in, fs, T_win=0.4):
         f, t, Zxx = signal.stft( #check overlap vs how much you step
             signal_in_processed[:, i],
             fs=fs,
-            window='hann', #gaussian
+            window="hann", #gaussian
             nperseg=nperseg,
             noverlap=noverlap,
             detrend=False,
-            return_onesided=True
+            return_onesided=True,
+            nfft=1024 # for better resolution of frequency bins
         )
         # Append to lists instead of indexing
         freq.append(f)
@@ -76,8 +76,9 @@ def compute_STFT(signal_in, fs, T_win=0.4):
 
 
 def plot_spectrogram(f, t, S,
+                     v_min=0.2,
+                     v_max=2,
                      title="Spectrogram",
-                     f_max=100,
                      cmap='jet',
                      dB=True,
                      figsize=(14,6)):
@@ -114,23 +115,28 @@ def plot_spectrogram(f, t, S,
     else:
         S_plot = S
 
+    # convert to frequency to velocity
+    lambda_val = 0.06  # meters for 5 GHz WiFi
+    v = f * lambda_val / 2
+
     # Dynamic range scaling (prevents overly bright outliers)
     #vmin = np.percentile(S_plot, vmin_percentile)
     #vmax = np.percentile(S_plot, vmax_percentile)
 
     # Plot
     plt.figure(figsize=figsize)
-    plt.pcolormesh(t, f, S_plot,
+    plt.pcolormesh(t, v, S_plot,
                    shading='gouraud',
                    cmap=cmap)
 
     plt.title(title, fontsize=14)
     plt.xlabel("Time [s]", fontsize=12)
-    plt.ylabel("Frequency [Hz]", fontsize=12)
+    plt.ylabel("Velocity [m/s]", fontsize=12)
 
     # Limit frequency axis
-    if f_max is not None:
-        plt.ylim([0, f_max])
+    if v_max is not None:
+        plt.ylim([v_min, v_max])
+        # plt.xlim([0, 10])
 
     cbar = plt.colorbar()
     cbar.set_label("Power (dB)" if dB else "Magnitude", fontsize=11)
@@ -138,7 +144,7 @@ def plot_spectrogram(f, t, S,
     plt.tight_layout()
     plt.show()
 
-def compute_pca_components(signal_clean, n_components=80, skip_first=1, whiten=False):
+def compute_pca_components(signal_clean, n_components=20, skip_first=1, whiten=False):
     """
     Compute PCA on CSI data and project onto principal components.
 
@@ -283,12 +289,39 @@ def normalize_by_sum_per_time(mag_pca):
 
     for pc in range(n_pcs):
         # Sum over all frequencies at each time step
-        sum_per_t = np.sum(mag_pca[pc], axis=0, keepdims=True)  # Shape: (1, n_times)
+        sum_per_t = np.sum(mag_pca[pc], axis=0, keepdims=True) + 1e-12 # Shape: (1, n_times)
 
         # Normalize (creates probability distribution over frequencies)
         mag_normalized[pc] = mag_pca[pc] / sum_per_t
 
     return mag_normalized
+
+def remove_low_freq(csi_data, w=50):
+        """
+        Remove low frequency components using rectangular window average.
+        This removes static reflections and DC offset.
+        
+        Parameters:
+        -----------
+        csi_data : ndarray
+            CSI data (time x channels)
+        w : int
+            Window width for moving average
+            
+        Returns:
+        --------
+        csi_filtered : ndarray
+            High-pass filtered CSI data
+        """
+        from scipy.ndimage import uniform_filter1d
+        
+        # Compute moving average for each channel
+        csi_smoothed = uniform_filter1d(csi_data, size=w, axis=0, mode='nearest')
+        
+        # Subtract moving average to remove low frequencies
+        csi_filtered = csi_data - csi_smoothed
+        
+        return csi_filtered
 
 
 def bandpass_filter(data, fs, low=0.3, high=60, order=4):
@@ -299,6 +332,7 @@ def bandpass_filter(data, fs, low=0.3, high=60, order=4):
     from scipy.signal import butter, filtfilt
     b, a = butter(order, [low/(fs/2), high/(fs/2)], btype='band')
     return filtfilt(b, a, data, axis=0)
+
 
 def hermite_function(n, t):
     """
@@ -405,6 +439,59 @@ def stft_with_hermite_window(signal_in, fs, T_win=0.4, hermite_order=0):
         return np.array(freq[0]), np.array(time[0]), np.array(mag)
 
 
+def per_pc_normalization(
+    mag,
+    f,
+    noise_f1=60,
+    noise_f2=80,
+    frame_percentile=95,
+    smooth_sigma=1.0
+):
+    """
+    Hybrid spectrogram processing.
+    mag: (n_pcs, n_freqs, n_times)
+    """
+
+    n_pcs, n_freqs, n_times = mag.shape
+    mag_pc_norm = np.zeros_like(mag)
+
+    # ---------- 1. Robust per-PC normalization ----------
+    for pc in range(n_pcs):
+        pc_energy = np.percentile(mag[pc], 90)
+        mag_pc_norm[pc] = mag[pc] / (pc_energy + 1e-12)
+
+    # ---------- 2. Average PCs ----------
+    S_avg = np.mean(mag_pc_norm, axis=0)   # (n_freqs, n_times)
+
+    # ---------- 3. Adaptive noise floor (per-frame) ----------
+    noise_mask = (f >= noise_f1) & (f <= noise_f2)
+    noise_floor = np.mean(S_avg[noise_mask, :], axis=0)
+    S_nf = np.maximum(S_avg - noise_floor[np.newaxis, :], 0.0)
+
+    # ---------- 4. Per-frame gain equalization ----------
+    frame_level = np.percentile(S_nf, frame_percentile, axis=0)
+    valid = frame_level > 0
+    ref_level = np.median(frame_level[valid]) if np.any(valid) else 1.0
+
+    gains = ref_level / (frame_level + 1e-12)
+    gains = np.clip(gains, 0.5, 3.0)
+    S_eq = S_nf * gains[np.newaxis, :]
+
+    # ---------- 5. Optional smoothing ----------
+    if smooth_sigma > 0:
+        S_eq = gaussian_filter1d(S_eq, sigma=smooth_sigma, axis=1)
+
+    return S_eq
+
+
+def frequency_weighting(mag, f, f_cut=15.0, alpha=2.0):
+    """
+    Smoothly down-weight low frequencies
+    """
+    w = np.ones_like(f)
+    idx = f < f_cut
+    w[idx] = (f[idx] / f_cut) ** alpha
+    return mag * w[:, np.newaxis]
 
 
 def process_stft_results(mag, f):
@@ -416,9 +503,102 @@ def process_stft_results(mag, f):
     f : ndarray
         Frequency values (n_freqs,) 
     """
-    mag_norm = normalize_by_sum_per_time(mag)
-    mag_avg  = np.mean(mag_norm, axis=0)
-    mag_nf   = adaptive_noise_floor_per_pc(mag_avg, f, 60, 80)
-    return mag_nf
+    mag_nf   = adaptive_noise_floor_per_pc(mag, f, 60, 80)
+    mag_norm = normalize_by_sum_per_time(mag_nf)
+    # average across PCs
+    mag_pc_avg = np.mean(mag_norm, axis=0)
+    #gaussian smoothing
+    # mag_smoothed = gaussian_filter1d(mag_pc_avg, sigma=5, axis=1)
+
+    return mag_pc_avg
 
 
+def calculate_movement_speed(S, t, f, percentile=0.5):
+    """
+    S: spectrogram magnitudes
+    t: time vector
+    f: frequency vector
+    percentile: threshold. percentile >=50 is torso, percentile >= 95 is limb
+    """
+    n_freq, n_time = S.shape
+    freq_speed = np.zeros(n_time)
+    cumulative_energy = np.cumsum(S, axis = 0)
+
+    #last row = total energy per time
+    total_energy = cumulative_energy[-1, :] + 1e-12
+
+    P = cumulative_energy / total_energy[None, :]
+
+    for t_idx in range(n_time):
+        idx = np.where(P[:, t_idx] >= percentile)[0]
+        if len(idx) > 0:
+            freq_speed[t_idx] = f[idx[0]]
+        else:
+            freq_speed[t_idx] = 0
+    
+    return freq_speed
+
+def calculate_torso_contour(S, f_band, gamma=0.015):
+    energy = np.sum(S, axis=0) + 1e-12
+    energy_ratio = S / energy[None, :]
+    freq_tc = np.zeros(S.shape[1])
+    for tt in range(S.shape[1]):
+        idx = np.where(energy_ratio[:, tt] > gamma)[0]
+        freq_tc[tt] = f_band[idx].max() if idx.size > 0 else 0.0
+    return freq_tc
+    
+
+def estimate_gate_cycle_time(torso_contour_freq, lambda_ = 0.05, fs=250):
+    from scipy.signal import butter, filtfilt, find_peaks
+    velocity_tc = torso_contour_freq * lambda_ / 2
+    b,a = butter(2, 2.0 / (fs/2)) # 2hz cuttoff
+    velocity_tc = filtfilt(b,a,velocity_tc)
+
+    vtc_max = np.max(velocity_tc)
+    steady_index = velocity_tc > 0.8 * vtc_max
+    vtc_steady = velocity_tc[steady_index]
+
+
+    vtc_centered = vtc_steady - np.mean(vtc_steady)
+    autocorrelation = np.correlate(vtc_centered, vtc_centered, mode='full')
+    lags = np.arange(-len(vtc_centered) + 1, len(vtc_centered))
+    autocorrelation = autocorrelation[lags >= 0]
+    lags = lags[lags >= 0]
+    tau = lags / fs
+
+    peaks, _ = find_peaks(autocorrelation, distance = fs*0.3)
+    tau_half = tau[peaks[0]]
+    gait_cycle_time = 2 * tau_half
+    
+    for p in peaks[:5]:
+        print(tau[p])
+    return gait_cycle_time
+
+def plot_spectrogram_overlay(S, t, f, 
+                            freq_tc=None, 
+                            torso_speed=None, 
+                            limb_speed=None):
+                            
+    plt.figure(figsize=(9,4.5))
+    extent = [t[0], t[-1], f[0], f[-1]]
+
+    # Spectrogram
+    plt.pcolormesh(t, f, S, shading='gouraud')
+    plt.colorbar(label='Magnitude (linear)')
+    plt.xlabel("Time (s)")
+    plt.ylabel("Frequency (Hz)")
+    plt.ylim([2, 60])
+
+    plt.title("Feature Extraction Overlay")
+
+    # Overlay feature extraction
+    if freq_tc is not None:
+        plt.plot(t, freq_tc, color='red', linewidth=1, label="Torso contour frequency")
+    if torso_speed is not None:
+            plt.plot(t, torso_speed, color='yellow', linewidth=1, label="Torso speed (50%)")
+    if limb_speed is not None:
+            plt.plot(t, limb_speed, color='pink', linewidth=1, label="Limb speed (95%)")
+
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
