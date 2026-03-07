@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.special import hermite, factorial
-from scipy.signal import stft, get_window
+from scipy.signal import stft, get_window, decimate
 from scipy.ndimage import gaussian_filter1d
 
 
@@ -76,8 +76,8 @@ def compute_STFT(signal_in, fs, T_win=0.4):
 
 
 def plot_spectrogram(f, t, S,
-                     v_min=0.2,
-                     v_max=2,
+                     v_min=0.3,
+                     v_max=2.25,
                      title="Spectrogram",
                      cmap='jet',
                      dB=True,
@@ -503,14 +503,16 @@ def process_stft_results(mag, f):
     f : ndarray
         Frequency values (n_freqs,) 
     """
-    mag_nf   = adaptive_noise_floor_per_pc(mag, f, 60, 80)
+    f_min = 8 # can change and optimize
+    freq_mask = f >= f_min
+    f_filtered = f[freq_mask]
+    mag_filtered = mag[:, freq_mask, :]
+
+    mag_nf   = adaptive_noise_floor_per_pc(mag_filtered, f_filtered, 80, 100) # TODO 
     mag_norm = normalize_by_sum_per_time(mag_nf)
     # average across PCs
     mag_pc_avg = np.mean(mag_norm, axis=0)
-    #gaussian smoothing
-    # mag_smoothed = gaussian_filter1d(mag_pc_avg, sigma=5, axis=1)
-
-    return mag_pc_avg
+    return mag_pc_avg, f_filtered
 
 
 def calculate_movement_speed(S, t, f, percentile=0.5):
@@ -535,8 +537,10 @@ def calculate_movement_speed(S, t, f, percentile=0.5):
             freq_speed[t_idx] = f[idx[0]]
         else:
             freq_speed[t_idx] = 0
-    
-    return freq_speed
+
+    lambda_val = 0.06  # meters for 5 GHz WiFi
+    velocity = freq_speed * lambda_val / 2
+    return velocity
 
 def calculate_torso_contour(S, f_band, gamma=0.015):
     energy = np.sum(S, axis=0) + 1e-12
@@ -582,12 +586,15 @@ def plot_spectrogram_overlay(S, t, f,
     plt.figure(figsize=(9,4.5))
     extent = [t[0], t[-1], f[0], f[-1]]
 
+    lambda_val = 0.06  # meters for 5 GHz WiFi
+    v = f * lambda_val / 2
+
     # Spectrogram
-    plt.pcolormesh(t, f, S, shading='gouraud')
+    plt.pcolormesh(t, v, S, shading='gouraud', cmap='jet')
     plt.colorbar(label='Magnitude (linear)')
     plt.xlabel("Time (s)")
-    plt.ylabel("Frequency (Hz)")
-    plt.ylim([2, 60])
+    plt.ylabel("Velocity (m/s)")
+    plt.ylim([0.3, 2.25])
 
     plt.title("Feature Extraction Overlay")
 
@@ -595,10 +602,142 @@ def plot_spectrogram_overlay(S, t, f,
     if freq_tc is not None:
         plt.plot(t, freq_tc, color='red', linewidth=1, label="Torso contour frequency")
     if torso_speed is not None:
-            plt.plot(t, torso_speed, color='yellow', linewidth=1, label="Torso speed (50%)")
+            plt.plot(t, torso_speed, color='red', linewidth=2, label="Torso speed (50%)")
     if limb_speed is not None:
             plt.plot(t, limb_speed, color='pink', linewidth=1, label="Limb speed (95%)")
 
     plt.legend()
     plt.tight_layout()
     plt.show()
+
+
+def plot_spec_and_features(S,t,f,
+                           freq_tc = None,
+                           torso_speed=None,
+                           limb_speed=None):
+    v = f * 0.06 / 2
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    ax0 = axes[0]
+    pcm = ax0.pcolormesh(t, v, S, shading='gouraud', cmap='jet')
+    fig.colorbar(pcm, ax=ax0, label='Magnitude (linear)')
+    ax0.set_xlabel("Time (s)")
+    ax0.set_ylabel("Velocity (m/s)")
+    ax0.set_title("Spectrogram")
+    ax0.set_ylim([0.35, 2])
+
+    # ---------------------------
+    # RIGHT: Extracted Features
+    # ---------------------------
+    ax1 = axes[1]
+
+    if freq_tc is not None:
+        freq_tc_speed = freq_tc * 0.06 / 2
+        ax1.plot(t, freq_tc_speed, linewidth=1, label="Torso contour")
+
+    if torso_speed is not None:
+        ax1.plot(t, torso_speed, linewidth=1, label="Torso speed (50%)")
+
+    if limb_speed is not None:
+        ax1.plot(t, limb_speed, linewidth=1, label="Limb speed (95%)")
+
+    ax1.set_xlabel("Time (s)")
+    ax1.set_ylabel("Velocity (m/s)")
+    ax1.set_title("Extracted Gait Features")
+    ax1.set_ylim([0.3, 2])
+    ax1.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+def visualize_gait_cycle(torso_contour_freq, lambda_=0.06, fs=250):
+    from scipy.signal import butter, filtfilt, find_peaks
+
+    # Convert to velocity
+    velocity_tc = torso_contour_freq * lambda_ / 2
+
+    # Low-pass filter (2 Hz)
+    b, a = butter(2, 2.0 / (fs/2))
+    velocity_tc = filtfilt(b, a, velocity_tc)
+
+    # Keep steady-state region
+    vtc_max = np.max(velocity_tc)
+    steady_index = velocity_tc > 0.8 * vtc_max
+    vtc_steady = velocity_tc[steady_index]
+
+    # Remove mean
+    vtc_centered = vtc_steady - np.mean(vtc_steady)
+
+    # Autocorrelation
+    autocorrelation = np.correlate(vtc_centered, vtc_centered, mode='full')
+    lags = np.arange(-len(vtc_centered) + 1, len(vtc_centered))
+    autocorrelation = autocorrelation[lags >= 0]
+    lags = lags[lags >= 0]
+    tau = lags / fs
+
+    peaks, _ = find_peaks(autocorrelation, distance=fs*0.3)
+
+    tau_half = tau[peaks[0]]
+    gait_cycle_time = 2 * tau_half
+
+    # -------------------------
+    # Plotting
+    # -------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Velocity plot
+    axes[0].plot(velocity_tc)
+    axes[0].set_title("Filtered Torso Velocity")
+    axes[0].set_xlabel("Samples")
+    axes[0].set_ylabel("Velocity (m/s)")
+
+    # Autocorrelation plot
+    axes[1].plot(tau, autocorrelation)
+    axes[1].plot(tau[peaks], autocorrelation[peaks], "ro")
+    axes[1].axvline(tau_half, linestyle="--")
+    axes[1].set_title("Autocorrelation")
+    axes[1].set_xlabel("Lag (s)")
+    axes[1].set_ylabel("Autocorrelation")
+
+    plt.tight_layout()
+    plt.show()
+
+    print("Half-cycle time:", tau_half)
+    print("Estimated gait cycle time:", gait_cycle_time)
+
+    return gait_cycle_time
+
+def downsample_csi(data, fs, target_fs):
+    """
+    data: csi data (time x subcarriers)
+    fs: original sampling rate
+    target_fs: sampling rate after downsampling, must be integer divisor of fs
+    """
+    factor = int(fs / target_fs)
+
+    data_downsampled = decimate(data, factor, axis=0, zero_phase=True)
+
+    fs_new = fs / factor
+    print(fs_new)
+    return data_downsampled, fs_new
+
+
+def freq_distribution(S):
+    freq_distribution = np.mean(S, axis=1)
+    return freq_distribution
+
+def freq_distribution_gait_phase(S, t):
+    n_freq, n_times = S.shape
+    phase_length = n_times // 4
+    
+    freq_distr_gait_phase = np.zeros((4,n_freq))
+    for phase in range(4):
+        start = phase * phase_length
+        end = start + phase_length
+
+        end = min(end, n_times)
+
+        freq_distr_gait_phase[phase] = np.mean(S[:, start:end], axis=1)
+
+    return freq_distr_gait_phase
