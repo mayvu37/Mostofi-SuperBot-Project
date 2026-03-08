@@ -4,6 +4,10 @@ from scipy import signal
 from scipy.special import hermite, factorial
 from scipy.signal import stft, get_window, decimate
 from scipy.ndimage import gaussian_filter1d
+from sklearn.neighbors import NearestCentroid
+from scipy.stats import binned_statistic
+import pandas as pd
+import os
 
 
 def compute_STFT(signal_in, fs, T_win=0.4):
@@ -521,6 +525,8 @@ def calculate_movement_speed(S, t, f, percentile=0.5):
     t: time vector
     f: frequency vector
     percentile: threshold. percentile >=50 is torso, percentile >= 95 is limb
+
+    returns a vector of the velocity over time
     """
     n_freq, n_time = S.shape
     freq_speed = np.zeros(n_time)
@@ -552,8 +558,9 @@ def calculate_torso_contour(S, f_band, gamma=0.015):
     return freq_tc
     
 
-def estimate_gate_cycle_time(torso_contour_freq, lambda_ = 0.05, fs=250):
+def estimate_gate_cycle_time(S, f, lambda_ = 0.05, fs=250):
     from scipy.signal import butter, filtfilt, find_peaks
+    torso_contour_freq = calculate_torso_contour(S, f)
     velocity_tc = torso_contour_freq * lambda_ / 2
     b,a = butter(2, 2.0 / (fs/2)) # 2hz cuttoff
     velocity_tc = filtfilt(b,a,velocity_tc)
@@ -575,7 +582,7 @@ def estimate_gate_cycle_time(torso_contour_freq, lambda_ = 0.05, fs=250):
     gait_cycle_time = 2 * tau_half
     
     for p in peaks[:5]:
-        print(tau[p])
+        print("gait cycle time: ", tau[p])
     return gait_cycle_time
 
 def plot_spectrogram_overlay(S, t, f, 
@@ -708,26 +715,28 @@ def visualize_gait_cycle(torso_contour_freq, lambda_=0.06, fs=250):
 
     return gait_cycle_time
 
-def downsample_csi(data, fs, target_fs):
+
+def bin_freq_distribution(S, f):
     """
-    data: csi data (time x subcarriers)
-    fs: original sampling rate
-    target_fs: sampling rate after downsampling, must be integer divisor of fs
+    bins the frequency distribution vector with 30 bins from 0.5 to 2.5 m/s
     """
-    factor = int(fs / target_fs)
+    lambda_val = 0.06  # meters for 5 GHz WiFi
+    v = f * lambda_val / 2
+    v_mask = (v >= 0.5) & (v <= 2.5)
+    velocity = v[v_mask]
+    freq_dist = np.mean(S, axis=1)
+    freq_dist = freq_dist[v_mask]
 
-    data_downsampled = decimate(data, factor, axis=0, zero_phase=True)
 
-    fs_new = fs / factor
-    print(fs_new)
-    return data_downsampled, fs_new
+    avg_energy, bin_edges, bin_number = binned_statistic(velocity, freq_dist, statistic='mean', bins=30)
+    bin_centers =  (bin_edges[:-1] + bin_edges[1:]) / 2
+    return avg_energy
 
 
-def freq_distribution(S):
-    freq_distribution = np.mean(S, axis=1)
-    return freq_distribution
-
-def freq_distribution_gait_phase(S, t):
+def freq_distribution_gait_phase(S):
+    """
+    where S is the spectrogram for one half-cycle
+    """
     n_freq, n_times = S.shape
     phase_length = n_times // 4
     
@@ -741,3 +750,68 @@ def freq_distribution_gait_phase(S, t):
         freq_distr_gait_phase[phase] = np.mean(S[:, start:end], axis=1)
 
     return freq_distr_gait_phase
+
+
+def generate_feature_vector(S, t, f):
+    """
+    S: spectrogram magnitudes during a constant psi or walking pattern
+    """
+    torso_velocity = calculate_movement_speed(S, t, f, percentile = 0.5)
+    torso_avg = np.mean(torso_velocity)
+    torso_range = np.max(torso_velocity) - np.min(torso_velocity)
+
+    cycle_time = estimate_gate_cycle_time(S, f)
+    stride_length = torso_avg * cycle_time
+    
+    freq_dist = np.mean(S, axis=1)
+    freq_dist_variance = np.var(freq_dist)
+    freq_dist_max = np.max(freq_dist)
+    freq_binned = bin_freq_distribution(S, f)
+
+
+    feature_vector = [torso_avg, torso_range, cycle_time, stride_length,
+                      freq_dist_variance, freq_dist_max]
+    feature_vector.extend(freq_binned.tolist())
+    
+    print(feature_vector)
+    return feature_vector
+
+def classify_feature_vector(training_vectors, training_labels, feature_vector):
+
+    """
+    Given a feature vector for one test point, classify who it is based on 
+    training feature vector and labels (person identity)
+    """
+    # classifier computes centroids
+    clf = NearestCentroid()
+    clf.fit(training_vectors, training_labels)
+    predicted_person = clf.predict(feature_vector)
+
+    return predicted_person
+
+
+def update_feature_file(feature_vector, data_name, filename='training_feature_vectors.xlsx'):
+    label = input("Input name (press Enter to skip saving): ").strip()
+    if label == "":
+        print("No label entered. Feature vector not saved.")
+        return
+    
+    row = [label] + list(feature_vector) + [data_name]
+
+    columns = (["Label", "torso_avg", "torso_range", "cycle_time", "stride_length",
+                      "freq_dist_variance", "freq_dist_max"]
+                + [f"velocity_bin_{i}" for i in range(30)]
+                + ["Data Name"])
+
+    df = pd.DataFrame([row], columns=columns)
+
+    if os.path.exists(filename):
+        existing = pd.read_excel(filename)
+        df = pd.concat([existing, df], ignore_index=True)
+    else:
+        print("Filepath does not exist")
+        return
+    df.to_excel(filename, index=False)
+    print(f"Feature vector saved for '{label}'.")
+
+
