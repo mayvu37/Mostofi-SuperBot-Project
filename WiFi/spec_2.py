@@ -40,6 +40,7 @@ class SpectrogramGenerator:
 # path = r"c:/Users/ptv57/Downloads/data_500.mat"
 # path = r"c:/Users/ptv57/Downloads/xmodal_data_2000.mat"
 path = r"c:/Users/ptv57/Downloads/Jose_500_T1.mat"
+
 filename = os.path.splitext(os.path.basename(path))[0]
 
 mat = sio.loadmat(path)
@@ -48,6 +49,7 @@ if not keys:
     raise ValueError("No data variables found in the .mat file.")
 var_name = keys[0]
 X = mat[var_name]
+
 print(f"Loaded '{var_name}' with shape {X.shape} and dtype {X.dtype}")
 
 if X.ndim != 2:
@@ -70,74 +72,74 @@ sf.plot_spectrogram(f, t, STFT_data,
 
                  figsize=(14,6))
 
-# t_min = 2.4
-# t_max = 8
-# time_mask = (t >= t_min) & (t <= t_max)
+t_min = 2.4
+t_max = 8
+time_mask = (t >= t_min) & (t <= t_max)
 
-# STFT_data = STFT_data[:, time_mask]
-# t = t[time_mask]
-
-
-# feature_vector = sf.generate_feature_vector(STFT_data, t, f)
-# sf.update_feature_file(feature_vector, filename)
+STFT_data = STFT_data[:, time_mask]
+t = t[time_mask]
 
 
-# file = "training_feature_vectors.xlsx"
-
-# df = pd.read_excel(file)
-
-# print(df.head())
-# print(df.columns)
-
-# plt.figure(figsize=(8,6))
-
-# sns.scatterplot(
-#     data=df,
-#     x="torso_avg",
-#     y="cycle_time",
-#     hue="Label",
-#     palette="tab10",
-#     s=80
-# )
-
-# plt.title("Feature Comparison: Torso Avg vs Stride Length")
-# plt.xlabel("Torso Avg Velocity")
-# plt.ylabel("Cycle Time")
-# plt.legend(title="Person")
-# plt.grid(True)
-
-# plt.show()
+feature_vector = sf.generate_feature_vector(STFT_data, t, f)
+sf.update_feature_file(feature_vector, filename)
 
 
-# velocity_bins = [c for c in df.columns if "velocity_bin" in c]
-# labels = df["Label"].unique()
+file = "training_feature_vectors.xlsx"
 
-# # iterate through labels in pairs
-# for i in range(0, len(labels), 2):
+df = pd.read_excel(file)
 
-#     fig, axes = plt.subplots(1, 2, figsize=(12,4))
+print(df.head())
+print(df.columns)
 
-#     for j in range(2):
+plt.figure(figsize=(8,6))
 
-#         if i + j >= len(labels):
-#             break
+sns.scatterplot(
+    data=df,
+    x="torso_avg",
+    y="cycle_time",
+    hue="Label",
+    palette="tab10",
+    s=80
+)
 
-#         label = labels[i + j]
-#         ax = axes[j]
+plt.title("Feature Comparison: Torso Avg vs Stride Length")
+plt.xlabel("Torso Avg Velocity")
+plt.ylabel("Cycle Time")
+plt.legend(title="Person")
+plt.grid(True)
 
-#         subset = df[df["Label"] == label]
+plt.show()
 
-#         for _, row in subset.iterrows():
 
-#             y = row[velocity_bins].values.astype(float)
-#             x = np.arange(len(y))
+velocity_bins = [c for c in df.columns if "velocity_bin" in c]
+labels = df["Label"].unique()
 
-#             ax.plot(x, y, alpha=0.6)
+# iterate through labels in pairs
+for i in range(0, len(labels), 2):
 
-#         ax.set_title(f"Velocity Distribution: {label}")
-#         ax.set_xlabel("Velocity Bin")
-#         ax.set_ylabel("Energy")
-#         ax.grid(True)
+    fig, axes = plt.subplots(1, 2, figsize=(12,4))
 
-#     plt.tight_layout()
-#     plt.show()
+    for j in range(2):
+
+        if i + j >= len(labels):
+            break
+
+        label = labels[i + j]
+        ax = axes[j]
+
+        subset = df[df["Label"] == label]
+
+        for _, row in subset.iterrows():
+
+            y = row[velocity_bins].values.astype(float)
+            x = np.arange(len(y))
+
+            ax.plot(x, y, alpha=0.6)
+
+        ax.set_title(f"Velocity Distribution: {label}")
+        ax.set_xlabel("Velocity Bin")
+        ax.set_ylabel("Energy")
+        ax.grid(True)
+
+    plt.tight_layout()
+    plt.show()
