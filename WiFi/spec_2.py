@@ -143,3 +143,39 @@ for i in range(0, len(labels), 2):
 
     plt.tight_layout()
     plt.show()
+
+V_t = compute_spectral_variance(f=f, S=S, f_min=30.0, f_max=60.0)
+
+t_start_best, t_end_best, mask_best_segment = find_constant_psi_segment(
+    t=t,
+    torso_speed=torso_speed,
+    V_t=V_t,
+    Tmin=3.0,
+    V_percentile_thresh=80,
+    torso_std_thresh=0.2
+)
+
+if t_start_best is None:
+    print("No constant-psi segment found")
+else:
+    print("Constant-psi segment:", t_start_best, "to", t_end_best)
+
+S = STFT_data
+f_plot = STFT_freq
+v = f_plot * 0.06 / 2
+
+plt.figure(figsize=(14, 6))
+plt.pcolormesh(t, v, S, shading='gouraud', cmap='viridis')
+plt.ylim([0, 2.5])
+plt.xlabel("Time [s]")
+plt.ylabel("Velocity [m/s]")
+plt.title("Constant-ψ Overlay")
+plt.colorbar(label="Magnitude")
+
+if t_start_best is not None:
+    plt.axvline(t_start_best, color='w', linestyle='--', linewidth=2, label='Constant-ψ start')
+    plt.axvline(t_end_best, color='r', linestyle='--', linewidth=2, label='Constant-ψ end')
+    plt.legend()
+
+plt.tight_layout()
+plt.show()
