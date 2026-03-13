@@ -814,4 +814,74 @@ def update_feature_file(feature_vector, data_name, filename='training_feature_ve
     df.to_excel(filename, index=False)
     print(f"Feature vector saved for '{label}'.")
 
+def compute_spectral_variance(f, S, f_min=5.0, f_max=60.0):
+    if S.ndim != 2:
+        raise ValueError(f"Got shape {S.shape}")
+
+    freq_mask = (f >= f_min) & (f <= f_max)
+    f_band = f[freq_mask]
+    S_band = np.maximum(S[freq_mask, :], 0.0)
+
+    energy_t = np.sum(S_band, axis=0) + 1e-12
+    P = S_band / energy_t[np.newaxis, :]
+
+    mu_f = np.sum(f_band[:, np.newaxis] * P, axis=0)
+    second_moment = np.sum((f_band[:, np.newaxis]**2) * P, axis=0)
+
+    V = second_moment - mu_f**2
+    return np.maximum(V, 0.0)
+def find_constant_psi_segment(t, torso_speed, V_t, Tmin=3.0,
+                              V_percentile_thresh=80,
+                              torso_std_thresh=0.12):
+    """
+    Find the FIRST constant-psi segment using low spectral variance
+    and low torso speed variation.
+    """
+    dt = np.mean(np.diff(t))
+    win_len = int(np.ceil(Tmin / dt))
+
+    if win_len < 2:
+        raise ValueError("Window length too small")
+
+    # Threshold for acceptable spectral spread
+    Vth = np.percentile(V_t, V_percentile_thresh)
+
+    valid_windows = []
+
+    for start in range(0, len(t) - win_len + 1):
+        end = start + win_len
+
+        V_win = V_t[start:end]
+        torso_win = torso_speed[start:end]
+
+        # Segment-level checks
+        V_ok = np.percentile(V_win, 90) <= Vth
+        torso_ok = np.nanstd(torso_win) <= torso_std_thresh
+
+        if V_ok and torso_ok:
+            valid_windows.append((start, end))
+
+    if not valid_windows:
+        return None, None, np.zeros(len(t), dtype=bool)
+
+    # Merge overlapping valid windows
+    merged = []
+    cur_start, cur_end = valid_windows[0]
+
+    for s, e in valid_windows[1:]:
+        if s <= cur_end:
+            cur_end = max(cur_end, e)
+        else:
+            merged.append((cur_start, cur_end))
+            cur_start, cur_end = s, e
+
+    merged.append((cur_start, cur_end))
+
+    # Pick the first merged segment
+    best_start, best_end = merged[0]
+
+    mask_best = np.zeros(len(t), dtype=bool)
+    mask_best[best_start:best_end] = True
+
+    return t[best_start], t[best_end - 1], mask_best
 
