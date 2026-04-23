@@ -1,0 +1,69 @@
+import subprocess
+import time
+import os
+import signal
+import sys
+
+# --- CONFIGURATION ---
+# Change these two to adjust your sensing window
+RUN_DURATION_SEC = 120  # Total time you want to transmit
+PACKET_DELAY_US = 2000  # Delay between packets in microseconds
+
+# Calculate the number of packets needed to fill that time
+# (Duration * 1,000,000us per sec) / Delay
+CALCULATED_REPEAT = int((RUN_DURATION_SEC * 1000000) / PACKET_DELAY_US)
+
+# Base command components (excluding the dynamic repeat)
+INTERFACE = "3"
+PRESET = "TX_CBW_20_HESU"
+
+def run_dynamic_picoscenes_cycle():
+    # Construct the command string with the calculated repeat count
+    cmd_args = (f"-d debug -i {INTERFACE} --mode injector "
+                f"--preset {PRESET} --repeat {CALCULATED_REPEAT} "
+                f"--delay {PACKET_DELAY_US}")
+    
+    full_cmd = f'PicoScenes "{cmd_args}"'
+    
+    print(f"\n[{time.strftime('%H:%M:%S')}] >>> CONFIG: {RUN_DURATION_SEC}s @ {PACKET_DELAY_US}us delay")
+    print(f"[{time.strftime('%H:%M:%S')}] >>> Calculated Packets: {CALCULATED_REPEAT}")
+    print(f"[{time.strftime('%H:%M:%S')}] >>> Launching Injection...")
+
+    process = subprocess.Popen(full_cmd, shell=True, start_new_session=True)
+    
+    try:
+        # We still use a timeout slightly longer than the duration 
+        # just in case the hardware hangs and doesn't exit on its own.
+        time.sleep(RUN_DURATION_SEC)
+        
+        # PicoScenes should finish right around now due to --repeat.
+        # We send SIGINT to ensure it closes the file and releases the NIC.
+        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+        
+        process.wait(timeout=5)
+        print(">>> Cycle Finished and Hardware Released.")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        # Cleanup if something goes wrong
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except:
+            pass
+
+def main():
+    print("PicoScenes Dynamic Timing Controller")
+    print("-" * 45)
+
+    try:
+        while True:
+            run_dynamic_picoscenes_cycle()
+            # Minimal gap to allow the driver to reset
+            time.sleep(1) 
+            
+    except KeyboardInterrupt:
+        print("\nStopping Automation...")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()
