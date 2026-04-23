@@ -1,24 +1,15 @@
-def calculate_torso_contour(S, f_band, gamma = 0.03):
-    """
-    S: denoised spectrogram
-    gamma (in percent): threshold for energy ratio of FFT
-    f_ref: frequency vector of the spectrogram
-    returns 
-    freq_tc: torso contour frequency
-    """
-    #energy at each time slice
-    energy = np.sum(S, axis = 0) + 1e-12
-    #energy ratio per frequency per time
-    energy_ratio = S / energy[None,:]
-    freq_tc = np.zeros(S.shape[1])
+# Only for feature extraction functions
 
-    for t in range(S.shape[1]):
-        index = np.where(energy_ratio[:,t] > gamma)[0]
-        if len(index) > 0:
-            freq_tc[t] = f_band[index].max()
-        else:
-            freq_tc[t] = 0
-    return freq_tc
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import signal
+from scipy.special import hermite, factorial
+from scipy.signal import stft, get_window, decimate
+from scipy.ndimage import gaussian_filter1d
+from sklearn.neighbors import NearestCentroid
+from scipy.stats import binned_statistic
+import pandas as pd
+import os
 
 
 def calculate_movement_speed(S, t, f, percentile=0.5):
@@ -27,6 +18,8 @@ def calculate_movement_speed(S, t, f, percentile=0.5):
     t: time vector
     f: frequency vector
     percentile: threshold. percentile >=50 is torso, percentile >= 95 is limb
+
+    returns a vector of the velocity over time
     """
     n_freq, n_time = S.shape
     freq_speed = np.zeros(n_time)
@@ -43,8 +36,47 @@ def calculate_movement_speed(S, t, f, percentile=0.5):
             freq_speed[t_idx] = f[idx[0]]
         else:
             freq_speed[t_idx] = 0
+
+    lambda_val = 0.06  # meters for 5 GHz WiFi
+    velocity = freq_speed * lambda_val / 2
+    return velocity
+
+def calculate_torso_contour(S, f_band, gamma=0.015):
+    energy = np.sum(S, axis=0) + 1e-12
+    energy_ratio = S / energy[None, :]
+    freq_tc = np.zeros(S.shape[1])
+    for tt in range(S.shape[1]):
+        idx = np.where(energy_ratio[:, tt] > gamma)[0]
+        freq_tc[tt] = f_band[idx].max() if idx.size > 0 else 0.0
+    return freq_tc
     
-    return freq_speed
+
+def estimate_gate_cycle_time(S, f, lambda_ = 0.05, fs=250):
+    from scipy.signal import butter, filtfilt, find_peaks
+    torso_contour_freq = calculate_torso_contour(S, f)
+    velocity_tc = torso_contour_freq * lambda_ / 2
+    b,a = butter(2, 2.0 / (fs/2)) # 2hz cuttoff
+    velocity_tc = filtfilt(b,a,velocity_tc)
+
+    vtc_max = np.max(velocity_tc)
+    steady_index = velocity_tc > 0.8 * vtc_max
+    vtc_steady = velocity_tc[steady_index]
+
+
+    vtc_centered = vtc_steady - np.mean(vtc_steady)
+    autocorrelation = np.correlate(vtc_centered, vtc_centered, mode='full')
+    lags = np.arange(-len(vtc_centered) + 1, len(vtc_centered))
+    autocorrelation = autocorrelation[lags >= 0]
+    lags = lags[lags >= 0]
+    tau = lags / fs
+
+    peaks, _ = find_peaks(autocorrelation, distance = fs*0.3)
+    tau_half = tau[peaks[0]]
+    gait_cycle_time = 2 * tau_half
+    
+    for p in peaks[:5]:
+        print("gait cycle time: ", tau[p])
+    return gait_cycle_time
 
 def plot_spectrogram_overlay(S, t, f, 
                             freq_tc=None, 
@@ -54,12 +86,15 @@ def plot_spectrogram_overlay(S, t, f,
     plt.figure(figsize=(9,4.5))
     extent = [t[0], t[-1], f[0], f[-1]]
 
+    lambda_val = 0.06  # meters for 5 GHz WiFi
+    v = f * lambda_val / 2
+
     # Spectrogram
-    plt.pcolormesh(t, f, S, shading='gouraud')
+    plt.pcolormesh(t, v, S, shading='gouraud', cmap='jet')
     plt.colorbar(label='Magnitude (linear)')
     plt.xlabel("Time (s)")
-    plt.ylabel("Frequency (Hz)")
-    plt.ylim([15, 100])
+    plt.ylabel("Velocity (m/s)")
+    plt.ylim([0.3, 2.25])
 
     plt.title("Feature Extraction Overlay")
 
@@ -67,7 +102,7 @@ def plot_spectrogram_overlay(S, t, f,
     if freq_tc is not None:
         plt.plot(t, freq_tc, color='red', linewidth=1, label="Torso contour frequency")
     if torso_speed is not None:
-            plt.plot(t, torso_speed, color='yellow', linewidth=1, label="Torso speed (50%)")
+            plt.plot(t, torso_speed, color='red', linewidth=2, label="Torso speed (50%)")
     if limb_speed is not None:
             plt.plot(t, limb_speed, color='pink', linewidth=1, label="Limb speed (95%)")
 
@@ -75,389 +110,186 @@ def plot_spectrogram_overlay(S, t, f,
     plt.tight_layout()
     plt.show()
 
-def plot_spectrogram_speeds(S, t, f, 
-                            freq_tc,
-                            torso_speed,
-                            limb_speed):
-    
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5), gridspec_kw={'width_ratios': [2.3, 1]})
-    ax = axes[0]
-    extent = [t[0], t[-1], f[0], f[-1]]
-    im = ax.imshow(S,
-                   aspect='auto',
-                   origin='lower',
-                   extent=extent,
-                   interpolation='nearest')
 
-    ax.set_title("Spectrogram", fontsize=13)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Frequency (Hz)")
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Magnitude")
-    ax2 = axes[1]
-    ax2.plot(t, freq_tc, color='red', label="Torso contour", linewidth=1.3)
+def plot_spec_and_features(S,t,f,
+                           freq_tc = None,
+                           torso_speed=None,
+                           limb_speed=None):
+    v = f * 0.06 / 2
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    ax0 = axes[0]
+    pcm = ax0.pcolormesh(t, v, S, shading='gouraud', cmap='jet')
+    fig.colorbar(pcm, ax=ax0, label='Magnitude (linear)')
+    ax0.set_xlabel("Time (s)")
+    ax0.set_ylabel("Velocity (m/s)")
+    ax0.set_title("Spectrogram")
+    ax0.set_ylim([0.35, 2])
+
+    # ---------------------------
+    # RIGHT: Extracted Features
+    # ---------------------------
+    ax1 = axes[1]
+
+    if freq_tc is not None:
+        freq_tc_speed = freq_tc * 0.06 / 2
+        ax1.plot(t, freq_tc_speed, linewidth=1, label="Torso contour")
+
     if torso_speed is not None:
-        ax2.plot(t, torso_speed, color='yellow', label="Torso speed (50%)", linewidth=1.3)
+        ax1.plot(t, torso_speed, linewidth=1, label="Torso speed (50%)")
+
     if limb_speed is not None:
-        ax2.plot(t, limb_speed, color='pink', label="Limb speed (95%)", linewidth=1.3)
-    ax2.set_title("Extracted Speed Features", fontsize=13)
-    ax2.set_xlabel("Time (s)")
-    ax2.set_ylabel("Frequency (Hz)")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="upper right", fontsize=9)
+        ax1.plot(t, limb_speed, linewidth=1, label="Limb speed (95%)")
+
+    ax1.set_xlabel("Time (s)")
+    ax1.set_ylabel("Velocity (m/s)")
+    ax1.set_title("Extracted Gait Features")
+    ax1.set_ylim([0.3, 2])
+    ax1.legend()
 
     plt.tight_layout()
     plt.show()
 
 
+def visualize_gait_cycle(torso_contour_freq, lambda_=0.06, fs=250):
+    from scipy.signal import butter, filtfilt, find_peaks
 
-torso_speed = calculate_movement_speed(mag, t, f, percentile=0.5)
-limb_speed = calculate_movement_speed(mag, t, f, percentile=0.95)
+    # Convert to velocity
+    velocity_tc = torso_contour_freq * lambda_ / 2
 
-plot_spectrogram_overlay(mag, t, f, torso_speed=torso_speed, limb_speed=limb_speed)
-plot_spectrogram_speeds(mag, t, f, freq_tc, torso_speed, limb_speed)
+    # Low-pass filter (2 Hz)
+    b, a = butter(2, 2.0 / (fs/2))
+    velocity_tc = filtfilt(b, a, velocity_tc)
 
+    # Keep steady-state region
+    vtc_max = np.max(velocity_tc)
+    steady_index = velocity_tc > 0.8 * vtc_max
+    vtc_steady = velocity_tc[steady_index]
 
+    # Remove mean
+    vtc_centered = vtc_steady - np.mean(vtc_steady)
 
-###### Segmentation method (used on spectrogram generated by code currently in spectrogram.py 11/26 ######
-#just to make sure not attached to older stuff
-f = f_band
-t = t_ref
-mag = S_eq  
-# Functions:
-      
-# Function to extract frequency and generalized speed curve
-# Speed curve is not accurate over whole walk due to psi not constant
-# Will be used to find the constant psi segment
-def extract_bodypart_percentile(f,          
-                                   t,          
-                                   S,          
-                                   fc_hz=5.32e9,   # Center carrier frequency
-                                   pct=0.5,        # Energy percentile for desired body part (50% - torso, 90% - leg)
-                                   f_min=5.0,      # Minimum frequency to consider as bodypart-related
-                                   f_max=60.0,     # Maximum frequency to consider as bodypart-related
-                                   smooth_sigma=3  # Std dev for Gaussian smoothing along time
-                                   ):
+    # Autocorrelation
+    autocorrelation = np.correlate(vtc_centered, vtc_centered, mode='full')
+    lags = np.arange(-len(vtc_centered) + 1, len(vtc_centered))
+    autocorrelation = autocorrelation[lags >= 0]
+    lags = lags[lags >= 0]
+    tau = lags / fs
 
-    # number of frequency and time bins from the spectrogram 
-    n_freqs, n_times = S.shape
+    peaks, _ = find_peaks(autocorrelation, distance=fs*0.3)
 
-    # Create a boolean mask to select frequencies in the band
-    freq_mask = (f >= f_min) & (f <= f_max)
-    f_bodypart_band = f[freq_mask] 
-    S_bodypart_band = S[freq_mask, :] 
-    # Ditch potentially neg vals
-    S_bodypart_band = np.maximum(S_bodypart_band, 0.0)
+    tau_half = tau[peaks[0]]
+    gait_cycle_time = 2 * tau_half
 
-    # Cumulative energy along the frequency axis for each time bin
-    cum_energy = np.cumsum(S_bodypart_band, axis=0) 
-    # Total energy per time bin 
-    total_energy = cum_energy[-1, :] 
-    total_energy = total_energy + 1e-12 
-    # Normalize cumulative energy 
-    cum_energy_norm = cum_energy / total_energy[np.newaxis, :]  
+    # -------------------------
+    # Plotting
+    # -------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-    # Array to hold the torso frequency at each time bin 
-    f_bodypart_raw = np.full(n_times, np.nan, dtype=float) 
+    # Velocity plot
+    axes[0].plot(velocity_tc)
+    axes[0].set_title("Filtered Torso Velocity")
+    axes[0].set_xlabel("Samples")
+    axes[0].set_ylabel("Velocity (m/s)")
 
-    # For each time index, find the smallest frequency where cumulative energy >= percentile
-    for ti in range(n_times):  # loop over time bins
-        # Extract the normalized cumulative energy curve for time bin
-        c_t = cum_energy_norm[:, ti]  
+    # Autocorrelation plot
+    axes[1].plot(tau, autocorrelation)
+    axes[1].plot(tau[peaks], autocorrelation[peaks], "ro")
+    axes[1].axvline(tau_half, linestyle="--")
+    axes[1].set_title("Autocorrelation")
+    axes[1].set_xlabel("Lag (s)")
+    axes[1].set_ylabel("Autocorrelation")
 
-        # Find indices where the cumulative energy is at least threshold 
-        idx_candidates = np.where(c_t >= pct)[0]
-        # skip bin if all too small
-        if idx_candidates.size == 0:
-            continue  
+    plt.tight_layout()
+    plt.show()
 
-        # First index to cross threshold
-        idx = idx_candidates[0]
-        # Collect corresponding frequency
-        f_bodypart_raw[ti] = f_bodypart_band[idx]
+    print("Half-cycle time:", tau_half)
+    print("Estimated gait cycle time:", gait_cycle_time)
 
-    # Compute the wavelength from the center frequency using λ = c / f
-    c = 3.0e8  # speed of light in m/s
-    wavelength = c / fc_hz  # meters
-
-    # Convert frequency to speed 
-    v_bodypart_raw = 0.5 * wavelength * f_bodypart_raw 
-
-    # Optionally smooth with Gaussian filter 
-    v_bodypart_smooth = gaussian_filter1d(v_bodypart_raw, sigma=smooth_sigma)
-
-    # Return time axis, smoothed speed curve, and raw frequencies
-    return t, v_bodypart_smooth, f_bodypart_raw
+    return gait_cycle_time
 
 
-# Function to compute variance per time slice Vth for psi segment
-def compute_spectral_variance(f,        
-                              S,        
-                              f_min=5.0,# min freq to include in var calculation
-                              f_max=60.0# max freq to include in var calculation
-                              ):
-    # Create a boolean mask to select frequencies in the band
-    freq_mask = (f >= f_min) & (f <= f_max)
-    f_bodypart_band = f[freq_mask] 
-    S_bodypart_band = S[freq_mask, :] 
-    # Ditch potentially neg vals
-    S_bodypart_band = np.maximum(S_bodypart_band, 0.0)
+def bin_freq_distribution(S, f):
+    """
+    bins the frequency distribution vector with 30 bins from 0.5 to 2.5 m/s
+    """
+    lambda_val = 0.06  # meters for 5 GHz WiFi
+    v = f * lambda_val / 2
+    v_mask = (v >= 0.5) & (v <= 2.5)
+    velocity = v[v_mask]
+    freq_dist = np.mean(S, axis=1)
+    freq_dist = freq_dist[v_mask]
 
-    # Total energy per time slice
-    energy_t = np.sum(S_bodypart_band, axis=0)  
-    energy_t = energy_t + 1e-12   
 
-    # Normalize each column 
-    P = S_bodypart_band / energy_t[np.newaxis, :]  
+    avg_energy, bin_edges, bin_number = binned_statistic(velocity, freq_dist, statistic='mean', bins=30)
+    bin_centers =  (bin_edges[:-1] + bin_edges[1:]) / 2
+    return avg_energy
 
-    # Mean frequency for each time
-    mu_f = np.sum(f_bodypart_band[:, np.newaxis] * P, axis=0)  
 
-    # Compute the second moment for each time
-    second_moment = np.sum((f_bodypart_band[:, np.newaxis]**2) * P, axis=0) 
-
-    # Variance 
-    V = second_moment - mu_f**2 
-
-    # Force any tiny negative numerical noise to zero
-    V = np.maximum(V, 0.0)
-
-    # Return variance per time
-    return V
-
-# Function to find segments of at least 3s of true in boolean array
-def find_boolean_segments(mask, t, min_duration=3.0):
+def freq_distribution_gait_phase(S):
+    """
+    where S is the spectrogram for one half-cycle
+    """
+    n_freq, n_times = S.shape
+    phase_length = n_times // 4
     
-    # Number of time points
-    n = mask.size
+    freq_distr_gait_phase = np.zeros((4,n_freq))
+    for phase in range(4):
+        start = phase * phase_length
+        end = start + phase_length
 
-    # If there are no True values at all, return empty list
-    if n == 0 or not mask.any():
-        return []
+        end = min(end, n_times)
 
-    # Difference between consecutive mask values
-    diff = np.diff(mask.astype(int))
-    # Indices where segments start: where diff == +1 
-    # (shift by +1 for actual start index),
-    # plus index 0 if mask[0] is already True
-    starts = list(np.where(diff == 1)[0] + 1)
-    if mask[0]:
-        starts.insert(0, 0)
-    # Indices where segments end: where diff == -1, 
-    # plus the last index if mask[-1] is True
-    ends = list(np.where(diff == -1)[0])
-    if mask[-1]:
-        ends.append(n - 1)
+        freq_distr_gait_phase[phase] = np.mean(S[:, start:end], axis=1)
 
-    # List to store valid segments 
-    segments = []
+    return freq_distr_gait_phase
 
-    # Loop over each start/end pair
-    for s_idx, e_idx in zip(starts, ends):
-        # Convert index range to time range
-        t_start = t[s_idx]
-        t_end   = t[e_idx]
 
-        # Duration of segment
-        duration = t_end - t_start
+def generate_feature_vector(S, t, f):
+    """
+    S: spectrogram magnitudes during a constant psi or walking pattern
+    """
+    torso_velocity = calculate_movement_speed(S, t, f, percentile = 0.5)
+    torso_avg = np.mean(torso_velocity)
+    torso_range = np.max(torso_velocity) - np.min(torso_velocity)
 
-        # Keep only segments long enough
-        if duration >= min_duration:
-            segments.append((t_start, t_end, s_idx, e_idx))
+    cycle_time = estimate_gate_cycle_time(S, f)
+    stride_length = torso_avg * cycle_time
+    
+    freq_dist = np.mean(S, axis=1)
+    freq_dist_variance = np.var(freq_dist)
+    freq_dist_max = np.max(freq_dist)
+    freq_binned = bin_freq_distribution(S, f)
 
-    # Return all segments that satisfy duration constraint
-    return segments
 
-# Implementation
-#Find constant psi segment in the walk (update to segments if works well)
-# Use more stable (torso) bodypart to choose segment
-t_torso, v_torso, f_torso = extract_bodypart_percentile(
-    f=f,             # frequency bins from STFT
-    t=t,             # time bins from STFT
-    S=mag,           # spectrogram magnitude
-    fc_hz=5.32e9,    # center frequency 
-    pct=0.5,         # 50% energy percentile for torso 
-    f_min=5.0,       
-    f_max=60.0,    
-    smooth_sigma=3   # smoothing strength for Gaussian
-)
+    feature_vector = [torso_avg, torso_range, cycle_time, stride_length,
+                      freq_dist_variance, freq_dist_max]
+    feature_vector.extend(freq_binned.tolist())
+    
+    print(feature_vector)
+    return feature_vector
 
-# Apply smoothing
-v_torso_smooth2 = gaussian_filter1d(v_torso, sigma=8)
 
-# Local torso speed stability 
-# rolling local mean using a 2-second smoothing
-v_local_mean = gaussian_filter1d(v_torso_smooth2, sigma=15)
+def update_feature_file(feature_vector, data_name, filename='training_feature_vectors.xlsx'):
+    label = input("Input name (press Enter to skip saving): ").strip()
+    if label == "":
+        print("No label entered. Feature vector not saved.")
+        return
+    
+    row = [label] + list(feature_vector) + [data_name]
 
-# Allowed deviation
-v_dev_thresh = 0.45   # increased from 0.3 in Xmodal
+    columns = (["Label", "torso_avg", "torso_range", "cycle_time", "stride_length",
+                      "freq_dist_variance", "freq_dist_max"]
+                + [f"velocity_bin_{i}" for i in range(30)]
+                + ["Data Name"])
 
-# Mask of where speed is near local mean 
-mask_stable_speed = np.abs(v_torso_smooth2 - v_local_mean) < v_dev_thresh
+    df = pd.DataFrame([row], columns=columns)
 
-# Ditch invalid speeds
-mask_stable_speed &= (v_torso_smooth2 > 0.3) & (v_torso_smooth2 < 2.5)
-
-# Spectral variance 
-V_t = compute_spectral_variance(f=f, S=mag, f_min=5.0, f_max=60.0)
-# Variance threshold .9 vs .8 in Xmodal
-V_thresh = np.percentile(V_t, 90)  
-mask_low_variance = V_t <= V_thresh
-
-# Either condition to identify regions
-mask_candidate = mask_low_variance | mask_stable_speed
-
-# Regions >= 3 secs
-segments_pre = find_boolean_segments(mask_candidate, t, min_duration=3.0)
-
-# If none -> stop
-if len(segments_pre) == 0:
-    print("No segments found — change thresholds")
-    mask_best_segment = np.zeros_like(mask_candidate)
-else:
-    # Choose longest candidate segment
-    durations = [seg[1] - seg[0] for seg in segments_pre]
-    best_idx = int(np.argmax(durations))
-    t_start_best, t_end_best, i_start, i_end = segments_pre[best_idx]
-
-    # Refine segment using both conditions 
-    mask_refined = mask_low_variance & mask_stable_speed
-
-    # Build mask only in refined window
-    mask_best_segment = np.zeros_like(mask_refined, dtype=bool)
-    mask_best_segment[i_start:i_end+1] = mask_refined[i_start:i_end+1]
-
-    # Ensure refined segment is at least 3 seconds
-    final_segments = find_boolean_segments(mask_best_segment, t, min_duration=3.0)
-
-    if len(final_segments) == 0:
-        print("Refined segment too short reverting to former segment")
-        mask_best_segment = np.zeros_like(mask_candidate)
-        mask_best_segment[i_start:i_end+1] = True
-        t_start_best, t_end_best = t_start_best, t_end_best
+    if os.path.exists(filename):
+        existing = pd.read_excel(filename)
+        df = pd.concat([existing, df], ignore_index=True)
     else:
-        # Pick longest refined segment
-        durations2 = [seg[1] - seg[0] for seg in final_segments]
-        best2 = int(np.argmax(durations2))
-        t_start_best, t_end_best, i_start2, i_end2 = final_segments[best2]
-        mask_best_segment = np.zeros_like(mask_candidate)
-        mask_best_segment[i_start2:i_end2+1] = True
-
-# Plot spectrogram with selected constant-ψ window
-plt.figure(figsize=(14, 6))
-plt.pcolormesh(t, f, mag, shading='gouraud', cmap='viridis')
-plt.ylim([0, 100])
-plt.xlabel("Time [s]")
-plt.ylabel("Frequency [Hz]")
-plt.title("Spectrogram with Constant-ψ Segment Overlay")
-cbar = plt.colorbar()
-cbar.set_label("Magnitude")
-
-# Draw vertical dashed lines at its start and end times
-if t_start_best is not None:
-    plt.axvline(t_start_best, color='w', linestyle='--', linewidth=2, label='Constant-ψ start')
-    plt.axvline(t_end_best,   color='r', linestyle='--', linewidth=2, label='Constant-ψ end')
-    plt.legend()
-
-plt.tight_layout()
-plt.show()
-
-
-# Crop walk to constant segment
-mag_seg = mag[:, mask_best_segment]        # spectrogram restricted to segment
-t_seg   = t[mask_best_segment]             # time values
-v_seg   = v_torso[mask_best_segment]       # torso-speed values
-
-# Torso and Limb Feature Extraction on Constant Segment
-# Torso
-t_torso_seg, v_torso_seg, f_torso_seg = extract_bodypart_percentile(
-    f=f,             # same frequency bins as STFT
-    t=t_seg,         # segmented time axis
-    S=mag_seg,       # segmented spectrogram
-    fc_hz=5.32e9,     # Center carrier frequency
-    pct=0.5,         # 50% percentile for torso
-    f_min=5.0,       
-    f_max=60.0,      # typical torso band upper bound
-    smooth_sigma=3   
-)
-
-# Limb
-t_limb_seg, v_limb_seg, f_limb_seg = extract_bodypart_percentile(
-    f=f,             
-    t=t_seg,        
-    S=mag_seg,      
-    fc_hz=5.32e9,    
-    pct=0.95,        # 95% percentile for limbs 
-    f_min=5.0,      
-    f_max=80.0,      # allow a bit higher band for limbs
-    smooth_sigma=3  
-)
-
-# Extra smoothing for plotting  
-f_torso_seg_smooth = gaussian_filter1d(f_torso_seg, sigma=2)
-f_limb_seg_smooth  = gaussian_filter1d(f_limb_seg,  sigma=2)
-
-# Duration of constant segment
-T_seg = t_seg[-1] - t_seg[0] if t_seg.size > 1 else 0.0
-
-# Mean torso speed (m/s)
-v_torso_mean = np.nanmean(v_torso_seg)
-
-# Standard deviation of torso speed (m/s)
-v_torso_std  = np.nanstd(v_torso_seg)
-
-# Mean limb speed (m/s)
-v_limb_mean  = np.nanmean(v_limb_seg)
-
-# Standard deviation of limb speed (m/s)
-v_limb_std   = np.nanstd(v_limb_seg)
-
-# Ratio of mean limb and torso speeds 
-v_ratio = v_limb_mean / (v_torso_mean + 1e-9)
-
-print("\n=== Basic Gait Features (Constant-ψ Segment) ===")
-print(f"Segment duration         : {T_seg:.2f} s")
-print(f"Mean torso speed         : {v_torso_mean:.3f} m/s")
-print(f"Torso speed std          : {v_torso_std:.3f} m/s")
-print(f"Mean limb speed          : {v_limb_mean:.3f} m/s")
-print(f"Limb speed std           : {v_limb_std:.3f} m/s")
-print(f"Limb/Torso mean ratio    : {v_ratio:.3f}")
-
-# Plot
-plt.figure(figsize=(12, 5))
-
-# Plot segment of spectrogram 
-plt.pcolormesh(
-    t_seg,             
-    f,                 
-    mag_seg,           
-    shading='gouraud', 
-    cmap='viridis'     
-)
-plt.ylim([0, 100])
-plt.xlabel("Time [s]")       
-plt.ylabel("Frequency [Hz]") 
-plt.title("Constant-ψ Segment: Torso & Limb")
-cbar = plt.colorbar()
-cbar.set_label("Magnitude (linear)")
-
-# Torso 
-plt.plot(
-    t_seg,                 
-    f_torso_seg_smooth,    
-    color='yellow',        
-    linewidth=1.5,         
-    label="Torso speed (50%)"
-)
-
-# Limb 
-plt.plot(
-    t_seg,                 
-    f_limb_seg_smooth,     
-    color='pink',          
-    linewidth=1.2,         
-    label="Limb speed (95%)"
-)
-plt.legend(loc='upper right')
-plt.tight_layout()
-plt.show()
+        print("Filepath does not exist")
+        return
+    df.to_excel(filename, index=False)
+    print(f"Feature vector saved for '{label}'.")
