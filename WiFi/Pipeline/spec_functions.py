@@ -789,26 +789,36 @@ def classify_feature_vector(training_vectors, training_labels, feature_vector):
 
     return predicted_person
 
-def classify_confidence_latest_row_csv(csv_file):
+def classify_latest_row_csv(csv_file):
     df = pd.read_csv(csv_file)
     df = df.dropna(how='all')
+    
+    labels = df.iloc[:, 0].values        
+    #drop last column (filenames)
+    feature_df = df.iloc[:, 1:-1]
+    feature_df = feature_df.apply(pd.to_numeric, errors='coerce')
+    features = feature_df.values.astype(float)
+    features = np.asarray(features, dtype=float)
 
-    latest = df.iloc[-1]
+    # split into train and test
+    X_train = features[:-1]
+    y_train = labels[:-1]
 
-    features = df.iloc[:, :-1]  # assuming last column is label
+    X_test = features[-1].reshape(1, -1)
 
-    distances = np.linalg.norm(features - latest[:-1], axis=1)
+    clf = NearestCentroid()
+    clf.fit(X_train, y_train)
 
-    best_idx = np.argmin(distances)
-    best_label = df.iloc[best_idx]["Label"]
+    pred = clf.predict(X_test)[0]
 
-    # confidence from inverse distance
-    confidence = 1.0 / (distances[best_idx] + 1e-6)
+    # confidence
+    centroids = clf.centroids_
+    distances = np.linalg.norm(centroids - X_test, axis=1)
 
-    # normalize to [0,1]
-    confidence = confidence / (np.max(1.0 / (distances + 1e-6)))
+    similarities = 1.0 / (distances + 1e-6)
+    confidence = similarities.max() / similarities.sum()
 
-    return best_label, float(confidence)
+    return pred, float(confidence)
     
 
 def update_feature_file(feature_vector, data_name, filename='training_feature_vectors.xlsx'):
