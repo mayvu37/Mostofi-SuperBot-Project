@@ -830,6 +830,7 @@ def compute_spectral_variance(f, S, f_min=5.0, f_max=60.0):
 
     V = second_moment - mu_f**2
     return np.maximum(V, 0.0)
+    
 def find_constant_psi_segment(t, torso_speed, V_t, Tmin=3.0,
                               V_percentile_thresh=80,
                               torso_std_thresh=0.12):
@@ -885,28 +886,181 @@ def find_constant_psi_segment(t, torso_speed, V_t, Tmin=3.0,
 
     return t[best_start], t[best_end - 1], mask_best
 
-def compute_spectral_variance(f, S, f_min=30.0, f_max=60.0):
+
+def normalized_autocorr_peak(x):
     """
-    Compute spectral variance over a selected frequency band
+    Periodicity score from normalized autocorrelation
     """
-    if S.ndim != 2:
-        raise ValueError(f"S must be 2D. Got shape {S.shape}")
+    x = np.asarray(x, dtype=float)
 
-    freq_mask = (f >= f_min) & (f <= f_max)
-    f_band = f[freq_mask]
-    S_band = np.maximum(S[freq_mask, :], 0.0)
+    if len(x) < 8:
+        return 0.0
 
-    energy_t = np.sum(S_band, axis=0) + 1e-12
-    P = S_band / energy_t[np.newaxis, :]
+    x = x - np.mean(x)
+    sx = np.std(x)
+    if sx < 1e-12:
+        return 0.0
 
-    mu_f = np.sum(f_band[:, np.newaxis] * P, axis=0)
-    second_moment = np.sum((f_band[:, np.newaxis] ** 2) * P, axis=0)
+    ac = np.correlate(x, x, mode='full')
+    ac = ac[len(ac)//2:]
 
-    V = second_moment - mu_f ** 2
-    return np.maximum(V, 0.0)
+    if ac[0] <= 1e-12:
+        return 0.0
+
+    ac = ac / ac[0]
+
+    # Ignore lag 0
+    peaks, _ = find_peaks(ac[1:], distance=max(1, len(x)//8))
+    if len(peaks) == 0:
+        return 0.0
+
+    peak_vals = ac[1:][peaks]
+    return float(np.max(peak_vals)) if len(peak_vals) > 0 else 0.0
+    
+def find_final_gait_segment(
+    S,
+    t,
+    f,
+    Tmin=3.0,
+    v_min=0.75,
+    v_max=1.25,
+    smooth_sigma=2.0,
+    energy_percentile_thresh=55,
+    expand_frac=0.40,
+    periodicity_thresh=0.20,
+    min_mean_energy_frac=0.55,
+    max_torso_std=0.25,
+    max_contour_std=0.30,
+    max_limb_std=0.22
+):
+    """
+    Segmentation pipeline:
+      1) compute torso-band energy curve
+      2) find the best Tmin-second periodic-energy seed
+      3) expand around it
+      4) accept/reject based on sanity checks
+    """
+    dt = np.mean(np.diff(t))
+    win_len = int(np.ceil(Tmin / dt))
+    if win_len < 3:
+        raise ValueError("Window length too small")
+
+    E_torso = compute_band_energy_curve(S, f, v_min=v_min, v_max=v_max)
+    E_smooth = gaussian_filter1d(E_torso, sigma=smooth_sigma)
+
+    Eth = np.percentile(E_smooth, energy_percentile_thresh)
+
+    best_score = -np.inf
+    best_start = None
+    best_end = None
+    best_periodicity = None
+    best_mean_energy = None
+
+
+    # Find best seed window
+    for start in range(0, len(t) - win_len + 1):
+        end = start + win_len
+        Ew = E_smooth[start:end]
+
+        mean_energy = np.mean(Ew)
+        if mean_energy < Eth:
+            continue
+
+        periodicity = normalized_autocorr_peak(Ew)
+        energy_std = np.std(Ew)
+
+        score = 3.0 * periodicity + 0.5 * mean_energy + 0.25 * energy_std
 
 
 
+        if score > best_score:
+            best_score = score
+            best_start = start
+            best_end = end
+            best_periodicity = periodicity
+            best_mean_energy = mean_energy
+
+    if best_start is None:
+        return None, None, np.zeros(len(t), dtype=bool), E_torso, E_smooth
+
+    # Expand around the best seed
+    peak_level = np.max(E_smooth[best_start:best_end])
+    expand_thresh = expand_frac * peak_level
+
+    left = best_start
+    while left > 0 and E_smooth[left - 1] >= expand_thresh:
+        left -= 1
+
+    right = best_end - 1
+    while right < len(E_smooth) - 1 and E_smooth[right + 1] >= expand_thresh:
+        right += 1
+
+    mask_best = np.zeros(len(t), dtype=bool)
+    mask_best[left:right + 1] = True
+
+    t_seg = t[mask_best]
+    seg_duration = t_seg[-1] - t_seg[0] if len(t_seg) > 1 else 0.0
+    seg_mean_energy = np.mean(E_smooth[mask_best])
+
+    global_mean_energy = np.mean(E_smooth) + 1e-12
+    relative_mean_energy = seg_mean_energy / global_mean_energy
+
+    # Segment feature sanity checks
+    S_seg = S[:, mask_best]
+    f_seg = f
+
+    try:
+        torso_speed_seg = calculate_movement_speed(S_seg, t_seg, f_seg, percentile=0.5)
+        torso_std_seg = float(np.nanstd(torso_speed_seg))
+    except Exception:
+        torso_speed_seg = None
+        torso_std_seg = np.inf
+
+    try:
+        limb_speed_seg = calculate_movement_speed(S_seg, t_seg, f_seg, percentile=0.95)
+        limb_std_seg = float(np.nanstd(limb_speed_seg))
+    except Exception:
+        limb_speed_seg = None
+        limb_std_seg = np.inf
+
+    try:
+        freq_tc_seg = calculate_torso_contour(S_seg, f_seg, gamma=0.015)
+        freq_tc_speed_seg = freq_tc_seg * 0.06 / 2
+        contour_std_seg = float(np.nanstd(freq_tc_speed_seg))
+    except Exception:
+        contour_std_seg = np.inf
+
+    # Final acceptance
+    accepted = True
+    reason = "Accepted"
+
+    if seg_duration < Tmin:
+        accepted = False
+        reason = f"Rejected: final segment shorter than Tmin ({seg_duration:.2f} s < {Tmin:.2f} s)"
+    elif best_periodicity < periodicity_thresh:
+        accepted = False
+        reason = f"Rejected: best seed periodicity too low ({best_periodicity:.3f} < {periodicity_thresh:.3f})"
+    elif relative_mean_energy < min_mean_energy_frac:
+        accepted = False
+        reason = (
+            f"Rejected: final segment energy too weak relative to overall walk "
+            f"({relative_mean_energy:.3f} < {min_mean_energy_frac:.3f})"
+        )
+    elif torso_std_seg > max_torso_std:
+        accepted = False
+        reason = f"Rejected: torso speed std too high ({torso_std_seg:.3f} > {max_torso_std:.3f})"
+    elif contour_std_seg > max_contour_std:
+        accepted = False
+        reason = f"Rejected: torso contour std too high ({contour_std_seg:.3f} > {max_contour_std:.3f})"
+    elif limb_std_seg > max_limb_std:
+        accepted = False
+        reason = f"Rejected: limb speed std too high ({limb_std_seg:.3f} > {max_limb_std:.3f})"
+
+    if not accepted:
+        return None, None, np.zeros(len(t), dtype=bool), E_torso, E_smooth
+
+    return t[left], t[right], mask_best, E_torso, E_smooth
+    
 def detect_fall_event(S, t, f):
     """
     opposite of walking sementation. A fall is
