@@ -789,6 +789,27 @@ def classify_feature_vector(training_vectors, training_labels, feature_vector):
 
     return predicted_person
 
+def classify_confidence_latest_row_csv(csv_file):
+    df = pd.read_csv(csv_file)
+    df = df.dropna(how='all')
+
+    latest = df.iloc[-1]
+
+    features = df.iloc[:, :-1]  # assuming last column is label
+
+    distances = np.linalg.norm(features - latest[:-1], axis=1)
+
+    best_idx = np.argmin(distances)
+    best_label = df.iloc[best_idx]["Label"]
+
+    # confidence from inverse distance
+    confidence = 1.0 / (distances[best_idx] + 1e-6)
+
+    # normalize to [0,1]
+    confidence = confidence / (np.max(1.0 / (distances + 1e-6)))
+
+    return best_label, float(confidence)
+    
 
 def update_feature_file(feature_vector, data_name, filename='training_feature_vectors.xlsx'):
     label = input("Input name (press Enter to skip saving): ").strip()
