@@ -161,5 +161,11 @@ df = df.dropna(how='all')
 print(df.head())
 print(df.columns)
 
-predicted_person = sf.classify_latest_row_csv('features.csv')
+predicted_person, confidence = sf.classify_latest_row_csv('features.csv')
 
+sf.log_event(
+    log_file="event_log.csv",
+    person=predicted_person,
+    confidence=confidence,
+    fall_events=fall_events
+)
