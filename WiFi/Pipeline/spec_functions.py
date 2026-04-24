@@ -1200,3 +1200,95 @@ def group_falls(falls, gap=1.0, min_dur=0.3, max_dur=1.5):
 
     return filtered
 
+def plot_combined_detection(
+    S, t, f,
+    t_start_best=None, t_end_best=None,
+    fall_events=None,
+    mask_walk=None,
+    title="Walking + Fall Detection Overlay"
+):
+    lambda_val = 0.06
+    v_axis = f * lambda_val / 2
+
+    plt.figure(figsize=(14, 6))
+    plt.pcolormesh(t, v_axis, S, shading='gouraud', cmap='jet')
+    plt.ylim([0.25, 2.5])
+    plt.xlabel("Time (s)")
+    plt.ylabel("Velocity (m/s)")
+    plt.title(title)
+    plt.colorbar(label="STFT Magnitude")
+
+    # walking
+    if t_start_best is not None:
+        plt.axvline(t_start_best, color='white', linestyle='--', linewidth=2, label='Walk start')
+        plt.axvline(t_end_best, color='cyan', linestyle='--', linewidth=2, label='Walk end')
+
+    # highlight entire walking region
+    if mask_walk is not None and np.any(mask_walk):
+        plt.fill_between(
+            t, 0, 2.5,
+            where=mask_walk,
+            color='white',
+            alpha=0.15,
+            label='Walking region'
+        )
+
+    # fall events
+    has_fall = False
+    if fall_events:
+        for i, (fs, fe) in enumerate(fall_events):
+            plt.axvspan(
+                fs, fe,
+                color='red',
+                alpha=0.35,
+                label='Fall' if i == 0 else None  # avoid duplicate legend entries
+            )
+    if not has_fall:
+        plt.plot([], [], color='red', label='No fall detected')
+        plt.text(
+            0.02, 0.95,
+            "No Fall Detected",
+            transform=plt.gca().transAxes,
+            fontsize=14,
+            color='white',
+            verticalalignment='top',
+            bbox=dict(facecolor='black', alpha=0.5, edgecolor='none')
+        )
+    plt.ylim([0.3,2.0])
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def log_event(log_file, person, confidence, fall_events):
+    """
+    Appends one inference event to a CSV log file.
+    """
+
+    timestamp = datetime.now().isoformat(timespec='seconds')
+
+    fall_detected = len(fall_events) > 0
+
+    fall_str = ";".join([f"{fs:.2f}-{fe:.2f}" for fs, fe in fall_events]) if fall_detected else ""
+
+    file_exists = os.path.isfile(log_file)
+
+    with open(log_file, mode='a', newline='') as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow([
+                "timestamp",
+                "person",
+                "confidence",
+                "fall_detected",
+                "fall_events"
+            ])
+
+        writer.writerow([
+            timestamp,
+            person,
+            confidence,
+            fall_detected,
+            fall_str
+        ])
