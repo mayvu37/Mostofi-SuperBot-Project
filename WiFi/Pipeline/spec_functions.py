@@ -2,9 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.special import hermite, factorial
-from scipy.signal import stft, get_window, decimate
-from scipy.ndimage import gaussian_filter1d
-from sklearn.neighbors import NearestCentroid
+from scipy.signal import stft, get_window, decimate, butter, filtfilt
+from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+#from sklearn.neighbors import NearestCentroid
 from scipy.stats import binned_statistic
 import pandas as pd
 import os
@@ -53,6 +53,8 @@ def compute_STFT(signal_in, fs, T_win=0.4):
     freq = []
     time = []
     mag = []
+    print(signal_in_processed[0,0])
+
 
     for i in range(signal_in_processed.shape[1]):
         # Compute STFT for this subcarrier/component
@@ -194,14 +196,14 @@ def compute_pca_components(signal_clean, n_components=20, skip_first=1, whiten=F
     # Step 5: Project data onto selected PCs
     X_proj = signal_clean @ V_k  # shape (T, n_components)
 
-    # Step 6: Optional whitening
-    if whiten:
-        # Get eigenvalues corresponding to selected PCs
-        lambda_k = eigvals[skip_first:skip_first + n_components]  # shape (n_components,)
-        whitening_scale = 1.0 / np.sqrt(lambda_k)  # shape (n_components,)
+    # # Step 6: Optional whitening
+    # if whiten:
+    #     # Get eigenvalues corresponding to selected PCs
+    #     lambda_k = eigvals[skip_first:skip_first + n_components]  # shape (n_components,)
+    #     whitening_scale = 1.0 / np.sqrt(lambda_k)  # shape (n_components,)
 
-        # Apply whitening (broadcast over time dimension)
-        X_proj = X_proj * whitening_scale[np.newaxis, :]
+    #     # Apply whitening (broadcast over time dimension)
+    #     X_proj = X_proj * whitening_scale[np.newaxis, :]
 
     # Print diagnostic info
     total_variance = np.sum(eigvals)
@@ -210,7 +212,7 @@ def compute_pca_components(signal_clean, n_components=20, skip_first=1, whiten=F
     print(f"  Input shape: {signal_clean.shape}")
     print(f"  Using PCs {skip_first+1} to {skip_first+n_components}")
     print(f"  Variance explained: {selected_variance/total_variance*100:.2f}%")
-    print(f"  Whitening: {'ON' if whiten else 'OFF'}")
+    # print(f"  Whitening: {'ON' if whiten else 'OFF'}")
     print(f"  Output shape: {X_proj.shape}")
 
     return X_proj, eigvals, eigvecs
@@ -317,7 +319,6 @@ def remove_low_freq(csi_data, w=50):
         csi_filtered : ndarray
             High-pass filtered CSI data
         """
-        from scipy.ndimage import uniform_filter1d
         
         # Compute moving average for each channel
         csi_smoothed = uniform_filter1d(csi_data, size=w, axis=0, mode='nearest')
@@ -333,7 +334,6 @@ def bandpass_filter(data, fs, low=0.3, high=60, order=4):
     Apply a bandpass filter to raw CSI data in the frequency domain
 
     """
-    from scipy.signal import butter, filtfilt
     b, a = butter(order, [low/(fs/2), high/(fs/2)], btype='band')
     return filtfilt(b, a, data, axis=0)
 
@@ -512,7 +512,7 @@ def process_stft_results(mag, f):
     f_filtered = f[freq_mask]
     mag_filtered = mag[:, freq_mask, :]
 
-    mag_nf   = adaptive_noise_floor_per_pc(mag_filtered, f_filtered, 80, 100) # TODO 
+    mag_nf   = adaptive_noise_floor_per_pc(mag_filtered, f_filtered, 60, 100) # TODO 
     mag_norm = normalize_by_sum_per_time(mag_nf)
     # average across PCs
     mag_pc_avg = np.mean(mag_norm, axis=0)
