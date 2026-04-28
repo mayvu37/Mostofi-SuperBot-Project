@@ -6,6 +6,7 @@ import glob
 import os
 import pandas as pd
 import seaborn as sns
+import time
 
 # --- YOUR PIPELINE CLASS ---
 class SpectrogramGenerator:
@@ -18,7 +19,6 @@ class SpectrogramGenerator:
         self.num_skip_pcs = 1 
 
     def prep_CSI_data(self, raw_CSI_data):
-        CSI_mag = np.abs(raw_CSI_data) 
         signal_clean = CSI_mag - np.mean(CSI_mag, axis=0)
         signal_filtered = sf.bandpass_filter(signal_clean, self.fs, low=self.f_min, high=self.f_max, order=4)
         X_PCA, _, _ = sf.compute_pca_components(signal_filtered,
@@ -28,6 +28,7 @@ class SpectrogramGenerator:
         return X_PCA
 
 # --- AUTOMATIC FILE SELECTION ---
+curr_time = time.time()
 def get_latest_csi():
     list_of_files = glob.glob('*.csi')
     if not list_of_files:
@@ -39,8 +40,8 @@ csi_filename = get_latest_csi()
 if csi_filename is None:
     print("Error: No .csi files found in this folder!")
     exit()
-
-print(f"--- Processing Most Recent File: {csi_filename} ---")
+    
+print(f"--- Processing Most Recent File: {csi_filename} after {time.time() - curr_time:.2f}---")
 
 # --- PICOSCENES PARSING SECTION ---
 try:
@@ -51,19 +52,23 @@ try:
     if X.size == 0:
         raise ValueError(f"The file '{csi_filename}' was parsed but contains no CSI data.")
 
-    print(f"Parsed PicoScenes data. Shape: {X.shape}")
+    print(f"Parsed PicoScenes data. Shape: {X.shape} after {time.time() - curr_time:.2f}")
 
 except Exception as e:
     print(f"Error: {e}")
     exit()
-
-raw_CSI_data = np.abs(X).astype(np.float64)
+    
+raw_CSI_data = np.abs(X)**2
+raw_CSI_data = raw_CSI_data.astype(np.float32)
 T, N = raw_CSI_data.shape
 
 spec = SpectrogramGenerator(raw_CSI_data)
 csi_post_pca = spec.prep_CSI_data(raw_CSI_data)
-f, t, mag = sf.compute_STFT(csi_post_pca, spec.fs, T_win=0.4)
+print(f"PCA done after {time.time() - curr_time}")
+f, t, mag = sf.compute_STFT(csi_post_pca.astype(np.float32), spec.fs, T_win=0.4)
+print(f"Spectrogram Generated after {time.time() - curr_time}")
 STFT_data, f = sf.process_stft_results(mag, f)
+print(f"Spectrogram Processed after {time.time() - curr_time}")
 
 
 # fall detection performed before segmentation
